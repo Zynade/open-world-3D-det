@@ -16,6 +16,7 @@ from pyquaternion import Quaternion
 from nuscenes.utils.geometry_utils import view_points, transform_matrix
 from nuscenes.utils.splits import create_splits_scenes
 from nuscenes import NuScenes
+from nuscenes.map_expansion.map_api import NuScenesMap
 
 import torch
 
@@ -30,9 +31,11 @@ ATTRIBUTE_NAMES = {
     "construction_vehicle": "vehicle.stopped",
     "trailer": "vehicle.stopped",
     "truck": "vehicle.stopped",
+    "trafficcone": "",
+    "constructionvehicle": "vehicle.stopped",
 }
 
-CAM_LIST = ["CAM_FRONT", "CAM_FRONT_LEFT", "CAM_FRONT_RIGHT", "CAM_BACK", "CAM_BACK_LEFT", "CAM_BACK_RIGHT"]
+CAM_LIST = ["CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_BACK_RIGHT", "CAM_BACK", "CAM_BACK_LEFT", "CAM_FRONT_LEFT"]
 
 class PointCloud(ABC):
     """
@@ -365,3 +368,116 @@ def get_shape_prior(
     
     else:
         return shape_priors[name]
+
+
+def get_nusc_map(
+    nusc: NuScenes,
+    scene: Dict
+    ) -> NuScenesMap:
+    
+    # Get scene location
+    log = nusc.get("log", scene["log_token"])
+    location = log["location"]
+
+    # Get nusc map
+    nusc_map = NuScenesMap(dataroot=INPUT_PATH, map_name=location)
+
+    return nusc_map
+
+
+def get_all_lane_points_in_scene(
+    nusc_map: NuScenesMap
+    ) -> Tuple[Dict[str, List[List[float]]], List[List[float]]]:
+
+    # Aggregate all lanes and lane connectors
+    lane_records = nusc_map.lane + nusc_map.lane_connector
+    lane_tokens = [lane["token"] for lane in lane_records]
+
+    # Get all lane points
+    lane_pt_dict = nusc_map.discretize_lanes(lane_tokens, 0.5) # 0.5m discretization
+
+    # Aggregate all lane points
+    all_lane_pts = []
+    for lane_pts in lane_pt_dict.values():
+        for lane_pt in lane_pts:
+            all_lane_pts.append(lane_pt)
+    
+    return lane_pt_dict, all_lane_pts
+
+
+def distance_matrix_lanes(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    squared: bool = False
+    ) -> torch.Tensor:
+
+    A = A.to(device=DEVICE)
+    B = B.to(device=DEVICE)
+
+    M = A.shape[0]
+    N = B.shape[0]
+
+    assert A.shape[1] == B.shape[1], f"The number of components for vectors in A \
+        {A.shape[1]} does not match that of B {B.shape[1]}!"
+
+    A_dots = torch.mul(
+                torch.mul(A, A).sum(dim=1).reshape((M,1)),
+                torch.Tensor(np.ones(shape=(1,N))).to(device=DEVICE)
+            )
+    B_dots = torch.mul(
+                torch.mul(B, B).sum(dim=1),
+                torch.Tensor(np.ones(shape=(M,1))).to(device=DEVICE)
+            )
+    D_squared =  torch.sub(
+                    torch.add(A_dots, B_dots),
+                    torch.mul(
+                        2, torch.mm(
+                            A, B.transpose(0, 1)
+                        )
+                    )
+                )
+
+    if squared == False:
+        zero_mask = torch.less(D_squared, 0.0)
+        D_squared[zero_mask] = 0.0
+        return torch.sqrt(D_squared)
+
+    print(A[1, :], B[1, :], D_squared[1, 1])
+    return D_squared
+
+
+def lane_yaws_distances_and_coords(
+    all_centroids: List[List[float]],
+    all_lane_pts: List[List[float]],
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+
+    all_lane_pts = torch.Tensor(all_lane_pts).to(device='cpu')
+    all_centroids = torch.Tensor(all_centroids).to(device='cpu')
+    print(all_lane_pts, all_centroids)
+    start = time.time()
+    # DistMat = distance_matrix_lanes(all_centroids[:, :2], all_lane_pts[:, :2])
+    # DistMat = distance_matrix(all_centroids[:, :2], all_lane_pts[:, :2])
+    DistMat = scipy.spatial.distance.cdist(all_centroids[:, :2], all_lane_pts[:, :2])
+    
+    min_lane_indices = np.argmin(DistMat, axis=1)
+    print(min_lane_indices)
+    distances = np.min(DistMat, axis=1)
+
+    all_lane_pts = np.array(all_lane_pts)
+    min_lanes = np.array([all_lane_pts[min_lane_indices[0]]])
+    for idx in min_lane_indices:
+        # print(idx)
+        min_lanes = np.vstack([min_lanes, all_lane_pts[idx, :]])
+    
+    # print(min_lanes.shape)
+
+    yaws = min_lanes[1:, 2]
+    coords = min_lanes[1:, :2]
+
+    print(distances.shape, yaws.shape, coords.shape)
+    end = time.time()
+
+    print(f"Closest lane took {end - start} seconds.")
+    timer['closest lane'] += end - start
+
+    return yaws, distances, coords
