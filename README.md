@@ -52,6 +52,20 @@ By default, the predictions are stored in `outputs/nuScenes-mini/mask_results_pr
 
 Inferring the GroundingSAM pipeline on nuScenes minival takes 12 minutes on one NVIDIA A100 GPU.
 
+To backproject LiDAR onto the masks produced by GroundingSAM and create 3D bboxes, run:
+```bash
+python load_lidar_nuscenes.py
+```
+Change the variables at the top of `load_lidar_nuscenes.py` according to your environment.
+
+
+To evaluate the predictions, run:
+```bash
+python eval_custom.py outputs/nuScenes-mini/predictions_naive.json --eval_set mini_val --version v1.0-trainval --dataroot /data2/mehark/nuScenes/nuScenes/ --verbose 10
+```
+
+
+
 # Acknowledgement
 - [SAM](https://github.com/facebookresearch/segment-anything)
 - [GroundingDINO](https://github.com/IDEA-Research/GroundingDINO)
