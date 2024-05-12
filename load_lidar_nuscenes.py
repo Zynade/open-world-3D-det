@@ -2,6 +2,8 @@ from nuscenes.nuscenes import NuScenes
 from pyquaternion import Quaternion
 from nuscenes.utils.data_classes import Quaternion as nQuaternion
 from utils.nuscenes import LidarPointCloud, view_points, count_frames, get_shape_prior, ATTRIBUTE_NAMES, CAM_LIST
+from utils.nuscenes import lane_yaws_distances_and_coords, distance_matrix_lanes, get_all_lane_points_in_scene
+from utils.nuscenes import get_nusc_map
 from utils.utils import get_medoid
 import os
 from pathlib import Path
@@ -30,7 +32,8 @@ shape_priors = json.load(open("outputs/nuScenes-mini/shape_priors.json"))
 
 
 
-def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool = False):
+def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool = False,
+    use_lanes_for_orientation: bool = False):
     """
     Create bounding boxes for the NuScenes dataset, using masked lidar points.
     
@@ -65,9 +68,12 @@ def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool
         sample_token = my_scene['first_sample_token']
 
         sample = nusc.get('sample', sample_token)
+
+        # Compute number of frames for progress bar
         num_frames = count_frames(nusc, sample)
         progress_bar = tqdm(range(num_frames))
 
+        # Initialize lists to keep track of centroids their ids
         all_centroids_list = []
         centroid_ids = []
         id_offset = -1
@@ -138,10 +144,13 @@ def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool
                 mask_sample_data = nusc.get('sample_data', mask_dict["sample_data_token"])
                 mask_channel = mask_sample_data["channel"]
                 # print(mask_sample_token, sample_token, mask_channel, mask_dict["category"])
-                if mask_sample_token != sample_token:
+                if mask_sample_token != sample["token"]:
                     continue
                 if mask_dict["score"] < 0.1:
                     continue
+
+                print(mask_channel, mask_dict["category"], mask_dict["score"])
+                # import time; time.sleep(0.5)
 
 
                 image_size = mask_dict["mask"]["size"]
@@ -243,6 +252,17 @@ def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool
         all_centroids_list = torch.stack(all_centroids_list)
         all_centroids_list = torch.squeeze(all_centroids_list)
 
+        if use_lanes_for_orientation:
+            # Get the map for this scene
+            nusc_map = get_nusc_map(nusc, scene)
+
+            # Get all lane objects and list of lane points
+            lane_pt_dict, lane_pt_list = get_all_lane_points_in_scene(nusc_map)
+
+            yaw_list, min_distance_list, lane_pt_coords_list = lane_yaws_distances_and_coords(
+                all_centroids_list, lane_pt_list
+            )
+
         for frame_num in range(num_frames):
             predictions["results"][sample["token"]] = []
             
@@ -264,8 +284,14 @@ def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool
 
                 extents = get_shape_prior(shape_priors, category)
 
-                # LANE_ALIGNED = ["car", "truck", "bus", "construction_vehicle", "trailer", "barrier"]
-                LANE_ALIGNED = []
+                if use_lanes_for_orientation:
+                    lane_yaw = yaw_list[id]
+                    # dist_from_lane = min_distance_list[id]
+                    LANE_ALIGNED = ["car", "truck", "bus", "construction_vehicle", "trailer", "barrier"]
+                else:
+                    LANE_ALIGNED = []
+                
+
                 if category in LANE_ALIGNED:
                     align_mat = np.eye(3)
                     align_mat[0:2, 0:2] = [[np.cos(lane_yaw), -np.sin(lane_yaw)], [np.sin(lane_yaw), np.cos(lane_yaw)]]
@@ -274,6 +300,11 @@ def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool
                     align_mat = np.eye(3)
 
                 rot_quaternion = Quaternion(matrix=align_mat)
+
+                if category == 'trafficcone':
+                    category = 'traffic_cone'
+                elif category == 'constructionvehicle':
+                    category = 'construction_vehicle'
 
                 box_dict = {
                         "sample_token": sample["token"],
@@ -304,7 +335,7 @@ def main():
     nusc.list_scenes()
     minival_scenes = ['scene-0103', 'scene-0916']
 
-    create_bboxes_nuscenes(nusc, minival_scenes)
+    create_bboxes_nuscenes(nusc, minival_scenes, use_lanes_for_orientation=True)
 
 
 if __name__ == "__main__":
