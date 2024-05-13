@@ -228,7 +228,7 @@ def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool
                 track_points = track_points[indices_within_mask.cpu()]
 
 
-                global_masked_points = aggr_pc_points[:3, track_points]
+                global_masked_points = aggr_pc_points[:, track_points]
 
                 if use_lanes_for_orientation:
                     if global_masked_points.numel() == 0:
@@ -252,7 +252,7 @@ def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool
 
                 else:
                     # Run PCA on the points within the mask
-                    
+                    global_masked_points = aggr_pc_points[:3, track_points]
                     print("-"*100)
                     print(global_masked_points.shape)
                     print(global_masked_points)
@@ -378,7 +378,7 @@ def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool
             if sample['next'] != "":
                 sample = nusc.get('sample', sample['next'])
 
-    with open(os.path.join(NUSCENES_OUTPUT, "predictions_naive_rc.json"), "w") as f:
+    with open(os.path.join(NUSCENES_OUTPUT, "predictions_naive_test.json"), "w") as f:
         json.dump(predictions, f)
 
 
@@ -389,8 +389,8 @@ def main():
     nusc.list_scenes()
     minival_scenes = ['scene-0103', 'scene-0916']
 
-    # create_bboxes_nuscenes(nusc, minival_scenes, use_lanes_for_orientation=True)
-    create_bboxes_nuscenes(nusc, minival_scenes, use_lanes_for_orientation=False)
+    create_bboxes_nuscenes(nusc, minival_scenes, use_lanes_for_orientation=True)
+    # create_bboxes_nuscenes(nusc, minival_scenes, use_lanes_for_orientation=False)
 
 
 if __name__ == "__main__":
