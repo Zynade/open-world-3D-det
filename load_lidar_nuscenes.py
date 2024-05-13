@@ -15,6 +15,7 @@ import PIL
 from tqdm import tqdm
 from typing import List
 import torch
+from PCADetection import PCADet
 
 # declare root dir global
 ROOT = Path(__file__).resolve().parents[0]
@@ -81,6 +82,7 @@ def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool
 
         # Frame-level loop
         for frame_num in progress_bar:
+            predictions["results"][sample["token"]] = []
 
             cam_data_dict = {}
             for camera in CAM_LIST:
@@ -204,6 +206,13 @@ def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool
                     points[1] < image_mask.shape[1] - 1     # ^
                 )
 
+
+
+                """
+                CODE TO USE LANE INFORMATION FOR ORIENTATION
+                WE FIRST COMPUTE THE MEDOID OF THE POINTS WITHIN THE MASK
+                """
+            
                 # floor points to get integer indices
                 floored_points = torch.floor(points[:, points_within_image]).to(dtype=int) # (N_masked,)
                 track_points = track_points[points_within_image.cpu()]
@@ -218,32 +227,75 @@ def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool
 
                 track_points = track_points[indices_within_mask.cpu()]
 
-                global_masked_points = aggr_pc_points[:, track_points]
 
-                if global_masked_points.numel() == 0:
-                    continue
+                global_masked_points = aggr_pc_points[:3, track_points]
 
-                id_offset_list1.append(id_offset)
+                if use_lanes_for_orientation:
+                    if global_masked_points.numel() == 0:
+                        continue
+                    
+                    id_offset_list1.append(id_offset)
 
-                if len(global_masked_points.shape) == 1:
-                    global_masked_points = torch.unsqueeze(global_masked_points, 1)
-                global_centroid = get_medoid(global_masked_points[:3, :].to(dtype=torch.float32, device=DEVICE))
+                    if len(global_masked_points.shape) == 1:
+                        global_masked_points = torch.unsqueeze(global_masked_points, 1)
+                    global_centroid = get_medoid(global_masked_points[:3, :].to(dtype=torch.float32, device=DEVICE))
+                    
+                    mask_pc = LidarPointCloud(global_masked_points[:, global_centroid][None].T)
+
+                    centroid = mask_pc.points[:3]
+                    all_centroids_list.append(torch.Tensor(centroid).to(DEVICE, dtype=torch.float32))
+                    centroid_ids.append(id_offset)
+                    final_id_offset = id_offset
+
+                    print(centroid)
+                    print("-"*50)
+
+                else:
+                    # Run PCA on the points within the mask
+                    
+                    print("-"*100)
+                    print(global_masked_points.shape)
+                    print(global_masked_points)
+                    if global_masked_points.numel() == 0 or len(global_masked_points.shape) == 1 or global_masked_points.shape[1] <= 3:
+                        continue
+                    pca = PCADet.PCADetection(global_masked_points.detach().cpu().numpy())
+                    extents, centroid = pca.get_extents_and_centroid()
+                    rotation_mat = pca.rotation_matrix
+
+                    rot_quaternion = Quaternion(matrix=rotation_mat)
+
+                    category = mask_dict["category"]
+                    score = mask_dict["score"]
+
+                    if category == 'trafficcone':
+                        category = 'traffic_cone'
+                    elif category == 'constructionvehicle':
+                        category = 'construction_vehicle'
+
+                    box_dict = {
+                        "sample_token": sample["token"],
+                        "translation": [float(i) for i in centroid],
+                        "size": list(extents),
+                        "rotation": list(rot_quaternion),
+                        "velocity": [0, 0],
+                        "detection_name": category,
+                        "detection_score": score,
+                        "attribute_name": ATTRIBUTE_NAMES[category]
+                    }
+
+                    assert sample["token"] in predictions["results"]
+
+                    predictions["results"][sample["token"]].append(box_dict)
+
+                    
                 
-                mask_pc = LidarPointCloud(global_masked_points[:, global_centroid][None].T)
-
-                centroid = mask_pc.points[:3]
-                all_centroids_list.append(torch.Tensor(centroid).to(DEVICE, dtype=torch.float32))
-                centroid_ids.append(id_offset)
-                final_id_offset = id_offset
-
-                print(centroid)
-                print("-"*50)
-            
             print("\n"*50)
 
             if sample['next'] != "":
                 sample = nusc.get('sample', sample['next'])
 
+        if not use_lanes_for_orientation:
+            continue
 
         sample = nusc.get('sample', scene['first_sample_token'])
         id_offset = -1
@@ -252,16 +304,18 @@ def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool
         all_centroids_list = torch.stack(all_centroids_list)
         all_centroids_list = torch.squeeze(all_centroids_list)
 
-        if use_lanes_for_orientation:
-            # Get the map for this scene
-            nusc_map = get_nusc_map(nusc, scene)
 
-            # Get all lane objects and list of lane points
-            lane_pt_dict, lane_pt_list = get_all_lane_points_in_scene(nusc_map)
 
-            yaw_list, min_distance_list, lane_pt_coords_list = lane_yaws_distances_and_coords(
-                all_centroids_list, lane_pt_list
-            )
+        
+        # Get the map for this scene
+        nusc_map = get_nusc_map(nusc, scene, nusc.dataroot)
+
+        # Get all lane objects and list of lane points
+        lane_pt_dict, lane_pt_list = get_all_lane_points_in_scene(nusc_map)
+
+        yaw_list, min_distance_list, lane_pt_coords_list = lane_yaws_distances_and_coords(
+            all_centroids_list, lane_pt_list
+        )
 
         for frame_num in range(num_frames):
             predictions["results"][sample["token"]] = []
@@ -324,7 +378,7 @@ def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool
             if sample['next'] != "":
                 sample = nusc.get('sample', sample['next'])
 
-    with open(os.path.join(NUSCENES_OUTPUT, "predictions_naive.json"), "w") as f:
+    with open(os.path.join(NUSCENES_OUTPUT, "predictions_naive_rc.json"), "w") as f:
         json.dump(predictions, f)
 
 
@@ -335,7 +389,8 @@ def main():
     nusc.list_scenes()
     minival_scenes = ['scene-0103', 'scene-0916']
 
-    create_bboxes_nuscenes(nusc, minival_scenes, use_lanes_for_orientation=True)
+    # create_bboxes_nuscenes(nusc, minival_scenes, use_lanes_for_orientation=True)
+    create_bboxes_nuscenes(nusc, minival_scenes, use_lanes_for_orientation=False)
 
 
 if __name__ == "__main__":

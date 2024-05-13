@@ -19,6 +19,7 @@ from nuscenes import NuScenes
 from nuscenes.map_expansion.map_api import NuScenesMap
 
 import torch
+import scipy
 
 ATTRIBUTE_NAMES = {
     "barrier": "",
@@ -372,9 +373,10 @@ def get_shape_prior(
 
 def get_nusc_map(
     nusc: NuScenes,
-    scene: Dict
+    scene: Dict,
+    INPUT_PATH: str
     ) -> NuScenesMap:
-    
+
     # Get scene location
     log = nusc.get("log", scene["log_token"])
     location = log["location"]
@@ -442,7 +444,6 @@ def distance_matrix_lanes(
         D_squared[zero_mask] = 0.0
         return torch.sqrt(D_squared)
 
-    print(A[1, :], B[1, :], D_squared[1, 1])
     return D_squared
 
 
@@ -453,14 +454,14 @@ def lane_yaws_distances_and_coords(
 
     all_lane_pts = torch.Tensor(all_lane_pts).to(device='cpu')
     all_centroids = torch.Tensor(all_centroids).to(device='cpu')
-    print(all_lane_pts, all_centroids)
-    start = time.time()
+    # print(all_lane_pts, all_centroids)
+    # start = time.time()
     # DistMat = distance_matrix_lanes(all_centroids[:, :2], all_lane_pts[:, :2])
     # DistMat = distance_matrix(all_centroids[:, :2], all_lane_pts[:, :2])
     DistMat = scipy.spatial.distance.cdist(all_centroids[:, :2], all_lane_pts[:, :2])
     
     min_lane_indices = np.argmin(DistMat, axis=1)
-    print(min_lane_indices)
+    # print(min_lane_indices)
     distances = np.min(DistMat, axis=1)
 
     all_lane_pts = np.array(all_lane_pts)
@@ -474,10 +475,10 @@ def lane_yaws_distances_and_coords(
     yaws = min_lanes[1:, 2]
     coords = min_lanes[1:, :2]
 
-    print(distances.shape, yaws.shape, coords.shape)
-    end = time.time()
+    # print(distances.shape, yaws.shape, coords.shape)
+    # end = time.time()
 
-    print(f"Closest lane took {end - start} seconds.")
-    timer['closest lane'] += end - start
+    # print(f"Closest lane took {end - start} seconds.")
+    # timer['closest lane'] += end - start
 
     return yaws, distances, coords
