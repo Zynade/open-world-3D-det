@@ -2,20 +2,30 @@ import numpy as np
 import matplotlib.pyplot as plt
 import numpy.linalg as LA
 from mpl_toolkits.mplot3d import Axes3D
+from sklearn.cluster import DBSCAN
 
 class PCADetection: 
     def __init__(self, points):
         self.points = points
+    
+    def outlier_exclusion(self):
+        self.points = self.points.T
+        max_distance = 4
+        min_points = 4
+        clustering = DBSCAN(eps=max_distance, min_samples=min_points).fit(self.points)
+        outlier_mask  = clustering.labels_ == -1
+        cleaned_points = self.points[~outlier_mask]
+        self.points = cleaned_points.T
+
     def compute_rotation(self):
+        self.outlier_exclusion()
         self.mean = np.mean(self.points, axis = 1)
         cov_matrix = np.cov(self.points)
         eigenvalues, eigenvectors = LA.eig(cov_matrix)
         self.centered_points = self.points - self.mean[:, np.newaxis]
         self.rotation_matrix = eigenvectors
-
         if LA.det(self.rotation_matrix) < 0:
             self.rotation_matrix = -self.rotation_matrix
-        print(self.rotation_matrix)
         aligned_points = self.rotation_matrix.T @ self.centered_points
         return aligned_points
 
