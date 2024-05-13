@@ -12,18 +12,36 @@ class PCADetection:
         eigenvalues, eigenvectors = LA.eig(cov_matrix)
         self.centered_points = self.points - self.mean[:, np.newaxis]
         self.rotation_matrix = eigenvectors
+
+        if LA.det(self.rotation_matrix) < 0:
+            self.rotation_matrix = -self.rotation_matrix
+        print(self.rotation_matrix)
         aligned_points = self.rotation_matrix.T @ self.centered_points
         return aligned_points
+
     def corner_points(self):
         aligned_points = self.compute_rotation()
         xmin, xmax, ymin, ymax, zmin, zmax = np.min(aligned_points[0, :]), np.max(aligned_points[0, :]), np.min(aligned_points[1, :]), np.max(aligned_points[1, :]), np.min(aligned_points[2, :]), np.max(aligned_points[2, :])
         box_coordinates = lambda x1, y1, z1, x2, y2, z2: np.array([[x1, x1, x2, x2, x1, x1, x2, x2], 
                                                                     [y1, y2, y2, y1, y1, y2, y2, y1], 
                                                                     [z1, z1, z1, z1, z2, z2, z2, z2]])
+        self.extremes = [xmin, xmax, ymin, ymax, zmin, zmax]
         self.realigned_points = self.rotation_matrix @ aligned_points
         self.realigned_points = self.realigned_points + self.mean[:, np.newaxis]
         self.corners = self.rotation_matrix @ box_coordinates(xmin, ymin, zmin, xmax, ymax, zmax)
         self.corners += self.mean[:, np.newaxis]
+    
+    def get_extents_and_centroid(self):
+        self.corner_points()
+        xmin, xmax, ymin, ymax, zmin, zmax = self.extremes
+        length = xmax - xmin
+        width = ymax - ymin
+        height = zmax - zmin
+        print(zmax - zmin)
+
+        centroid = np.mean(self.corners, axis=1)
+
+        return (width, length, height), centroid
         
     def compute_yaw(self):
         self.corner_points()
