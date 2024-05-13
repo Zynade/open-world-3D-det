@@ -4,7 +4,7 @@ from nuscenes.utils.data_classes import Quaternion as nQuaternion
 from utils.nuscenes import LidarPointCloud, view_points, count_frames, get_shape_prior, ATTRIBUTE_NAMES, CAM_LIST
 from utils.nuscenes import lane_yaws_distances_and_coords, distance_matrix_lanes, get_all_lane_points_in_scene
 from utils.nuscenes import get_nusc_map
-from utils.utils import get_medoid
+from utils.utils import get_medoid, draw_mask
 import os
 from pathlib import Path
 from pycocotools import mask as mask_utils
@@ -12,10 +12,13 @@ import json
 import numpy as np
 import cv2
 import PIL
+from PIL import Image, ImageDraw
 from tqdm import tqdm
 from typing import List
 import torch
+import random
 from PCADetection import PCADet
+import matplotlib.pyplot as plt
 
 # declare root dir global
 ROOT = Path(__file__).resolve().parents[0]
@@ -24,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[0]
 NUSCENES_DATA = "/data2/mehark/nuScenes/nuScenes/"
 NUSCENES_OUTPUT = "outputs/nuScenes-mini/"
 NUSCENES_VERSION = "v1.0-trainval"
+OUTPUT_DIR = "outputs/nuScenes-mini/vis/"
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 min_dist= 2.3
@@ -34,7 +38,7 @@ shape_priors = json.load(open("outputs/nuScenes-mini/shape_priors.json"))
 
 
 def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool = False,
-    use_lanes_for_orientation: bool = False, remove_noise: bool = False):
+    use_lanes_for_orientation: bool = False):
     """
     Create bounding boxes for the NuScenes dataset, using masked lidar points.
     
@@ -100,43 +104,57 @@ def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool
 
                 cam_data_dict[camera] = data
 
-            pointsensor_token = sample['data']["LIDAR_TOP"]
-            pointsensor = nusc.get('sample_data', pointsensor_token)
+                
             
-            aggr_set = []
-            pointsensor_next = nusc.get('sample_data', pointsensor_token)
+            # aggr_set = []
 
-            # Loop for LiDAR pcd aggregation
-            for i in range(3):
-                pcl_path = os.path.join(nusc.dataroot, pointsensor_next['filename'])
-                pc = LidarPointCloud.from_file(pcl_path, DEVICE)
+            # # Loop for LiDAR pcd aggregation
+            # for i in range(3):
+            #     pcl_path = os.path.join(nusc.dataroot, pointsensor_next['filename'])
+            #     pc = LidarPointCloud.from_file(pcl_path, DEVICE)
 
-                lidar_points = pc.points
-                mask = torch.ones(lidar_points.shape[1]).to(device=DEVICE)
-                mask = torch.logical_and(mask, torch.abs(lidar_points[0, :]) < np.sqrt(min_dist))
-                mask = torch.logical_and(mask, torch.abs(lidar_points[1, :]) < np.sqrt(min_dist))
-                lidar_points = lidar_points[:, ~mask]
-                pc = LidarPointCloud(lidar_points)
+            #     lidar_points = pc.points
+            #     mask = torch.ones(lidar_points.shape[1]).to(device=DEVICE)
+            #     mask = torch.logical_and(mask, torch.abs(lidar_points[0, :]) < np.sqrt(min_dist))
+            #     mask = torch.logical_and(mask, torch.abs(lidar_points[1, :]) < np.sqrt(min_dist))
+            #     lidar_points = lidar_points[:, ~mask]
+            #     pc = LidarPointCloud(lidar_points)
 
-                # Points live in the point sensor frame. So they need to be transformed via global to the image plane.
-                # First step: transform the pointcloud to the ego vehicle frame for the timestamp of the sweep.
-                cs_record = nusc.get('calibrated_sensor', pointsensor_next['calibrated_sensor_token'])
-                pc.rotate(torch.from_numpy(Quaternion(cs_record['rotation']).rotation_matrix).to(device=DEVICE, dtype=torch.float32))
-                pc.translate(torch.from_numpy(np.array(cs_record['translation'])).to(device=DEVICE, dtype=torch.float32))
+            #     # Points live in the point sensor frame. So they need to be transformed via global to the image plane.
+            #     # First step: transform the pointcloud to the ego vehicle frame for the timestamp of the sweep.
+            #     cs_record = nusc.get('calibrated_sensor', pointsensor_next['calibrated_sensor_token'])
+            #     pc.rotate(torch.from_numpy(Quaternion(cs_record['rotation']).rotation_matrix).to(device=DEVICE, dtype=torch.float32))
+            #     pc.translate(torch.from_numpy(np.array(cs_record['translation'])).to(device=DEVICE, dtype=torch.float32))
 
-                # Second step: transform from ego to the global frame.
-                poserecord = nusc.get('ego_pose', pointsensor_next['ego_pose_token'])
-                pc.rotate(torch.from_numpy(Quaternion(poserecord['rotation']).rotation_matrix).to(device=DEVICE, dtype=torch.float32))
-                pc.translate(torch.from_numpy(np.array(poserecord['translation'])).to(device=DEVICE, dtype=torch.float32))
+            #     # Second step: transform from ego to the global frame.
+            #     poserecord = nusc.get('ego_pose', pointsensor_next['ego_pose_token'])
+            #     pc.rotate(torch.from_numpy(Quaternion(poserecord['rotation']).rotation_matrix).to(device=DEVICE, dtype=torch.float32))
+            #     pc.translate(torch.from_numpy(np.array(poserecord['translation'])).to(device=DEVICE, dtype=torch.float32))
 
-                aggr_set.append(pc.points)
-                try:
-                    pointsensor_next = nusc.get('sample_data', pointsensor_next['next'])
-                except KeyError:
-                    break
+            #     aggr_set.append(pc.points)
+            #     try:
+            #         pointsensor_next = nusc.get('sample_data', pointsensor_next['next'])
+            #     except KeyError:
+            #         break
             
-            aggr_pc_points = torch.hstack(tuple([pcd for pcd in aggr_set]))
-            print(aggr_pc_points.shape)
+            # aggr_pc_points = torch.hstack(tuple([pcd for pcd in aggr_set]))
+            # print(aggr_pc_points.shape)
+
+            """ Commentable code for visualization"""
+            # Load all RGB images for the current frame
+            IMAGE_LIST = []
+            for c in range(len(CAM_LIST)):
+                camera_token = sample['data'][CAM_LIST[c]]
+                cam = nusc.get('sample_data', camera_token)
+
+                im = Image.open(os.path.join(nusc.dataroot, cam['filename']))
+                sz_init = im.size
+                im.thumbnail([1024, 1024])
+                sz = im.size
+                ratio = sz[0]/sz_init[0]
+
+                IMAGE_LIST.append(im)
+            """ Commentable code ends """
 
             # Get the masks for this frame
             for mask_dict in masks_json:
@@ -161,6 +179,17 @@ def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool
 
                 cam_data = cam_data_dict[mask_channel]
 
+                # TODO: Load pseudo-LiDAR pointcloud
+                image_path = nusc.get_sample_data_path(mask_sample_data['token'])
+                xyz_path = os.path.join(NUSCENES_OUTPUT, 'samples-pseudodepth', mask_channel, image_path.split("/")[-1].replace("jpg", "xyz.npy"))
+                aggr_pc_points = torch.from_numpy(np.load(xyz_path))
+                aggr_pc_points = aggr_pc_points.squeeze(0)
+                aggr_pc_points = torch.flatten(aggr_pc_points, start_dim=1)
+                # aggr_pc_points = aggr_pc_points[:, random.sample(range(aggr_pc_points.shape[1]), 600000)]
+                aggr_pc_points = torch.vstack([aggr_pc_points.to(device=DEVICE, dtype=torch.float32),
+                                               torch.ones(aggr_pc_points.shape[1]).unsqueeze(0).to(device=DEVICE, dtype=torch.float32)])
+                
+                print(aggr_pc_points.shape)
                 mask_1 = PIL.Image.fromarray(mask_array)
                 mask_array = mask_array[:, :].astype(bool)
                 mask_array = torch.transpose(torch.from_numpy(mask_array).to(device=DEVICE, dtype=bool), 1, 0)
@@ -169,21 +198,24 @@ def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool
 
                 # pass in a copy of the aggregate pointcloud array
                 # reset the lidar pointcloud
-                cam_pc = LidarPointCloud(torch.clone(aggr_pc_points))
+                cam_pc = LidarPointCloud(torch.clone(aggr_pc_points)) # aggr_pc_points is in the global frame
 
-                # transform from global into the ego vehicle frame for the timestamp of the image.
-                # poserecord = nusc.get('ego_pose', cam['ego_pose_token'])
-                poserecord = cam_data['ego_pose']
-                cam_pc.translate(torch.from_numpy(-np.array(poserecord['translation'])).to(device=DEVICE, dtype=torch.float32))
-                cam_pc.rotate(torch.from_numpy(Quaternion(poserecord['rotation']).rotation_matrix.T).to(device=DEVICE, dtype=torch.float32))
+                glob_pc = LidarPointCloud(torch.clone(aggr_pc_points))
 
-                # transform from ego into the camera.
-                # cs_record = nusc.get('calibrated_sensor', cam['calibrated_sensor_token'])
+                # transform from camera to ego vehicle frame
                 cs_record = cam_data['calibrated_sensor']
-                cam_pc.translate(torch.from_numpy(-np.array(cs_record['translation'])).to(device=DEVICE, dtype=torch.float32))
-                cam_pc.rotate(torch.from_numpy(Quaternion(cs_record['rotation']).rotation_matrix.T).to(device=DEVICE, dtype=torch.float32))
+                glob_pc.rotate(torch.from_numpy(Quaternion(cs_record['rotation']).rotation_matrix).to(device=DEVICE, dtype=torch.float32))
+                glob_pc.translate(torch.from_numpy(np.array(cs_record['translation'])).to(device=DEVICE, dtype=torch.float32))
+
+                # transform from ego to the global frame
+                poserecord = cam_data['ego_pose']
+                glob_pc.rotate(torch.from_numpy(Quaternion(poserecord['rotation']).rotation_matrix).to(device=DEVICE, dtype=torch.float32))
+                glob_pc.translate(torch.from_numpy(np.array(poserecord['translation'])).to(device=DEVICE, dtype=torch.float32))
+
+                aggr_pc_points = torch.clone(glob_pc.points)
 
                 depths = cam_pc.points[2, :]
+                coloring = depths
 
                 # fetch the camera intrinsics
                 camera_intrinsic = torch.from_numpy(np.array(cs_record["camera_intrinsic"])).to(device=DEVICE, dtype=torch.float32)
@@ -229,6 +261,7 @@ def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool
 
 
                 global_masked_points = aggr_pc_points[:, track_points]
+                print(global_masked_points.shape)
 
                 if use_lanes_for_orientation:
                     if global_masked_points.numel() == 0:
@@ -238,6 +271,9 @@ def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool
 
                     if len(global_masked_points.shape) == 1:
                         global_masked_points = torch.unsqueeze(global_masked_points, 1)
+                    
+                    if global_masked_points.shape[1] > 30000:
+                        global_masked_points = global_masked_points[:, random.sample(range(global_masked_points.shape[1]), 30000)]
                     global_centroid = get_medoid(global_masked_points[:3, :].to(dtype=torch.float32, device=DEVICE))
                     
                     mask_pc = LidarPointCloud(global_masked_points[:, global_centroid][None].T)
@@ -249,6 +285,31 @@ def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool
 
                     print(centroid)
                     print("-"*50)
+
+                    """ Commentable code for visualization """
+                    masked_points_color = np.array([[0, 1, 0, 1]]*masked_points_pixels[0].shape[0])
+                    print("ax im: ", IMAGE_LIST[c].size)
+                    plt.figure(figsize=(16, 9))
+                    plt.imshow(IMAGE_LIST[c])
+                    # plt.scatter(masked_points_pixels[0][:].cpu(), masked_points_pixels[1][:].cpu(), c=masked_points_color, s=4)
+                    plt.scatter(points.cpu()[0, :], points.cpu()[1, :], c=coloring.cpu(), s=1)
+                    # plt.scatter(virtual_points[0, :], virtual_points[1, :], c=[[1, 0, 0, 1]], s=2)
+                    # plt.scatter(centroid[0], centroid[1], c=[[1, 0, 0, 1]], s=6)
+                    plt.axis('off')
+                    plt.savefig(os.path.join(OUTPUT_DIR, f"lidar_2tnew_{frame_num}_{c}"), bbox_inches='tight', pad_inches=0, dpi=200)
+
+                    lidar_img = Image.open(os.path.join(OUTPUT_DIR, f"lidar_2tnew_{frame_num}_{c}.png"))
+                    # lidar_img.thumbnail([1024, 1024])
+
+                    mask_image_1 = Image.new('RGBA', mask_1.size, color=(0, 0, 0, 0))
+                    mask_draw_1 = ImageDraw.Draw(mask_image_1)
+                    draw_mask(mask_array.cpu().numpy().T, mask_draw_1, random_color=True)
+
+                    lidar_img.alpha_composite(mask_image_1)
+
+                    lidar_img.save(os.path.join(OUTPUT_DIR, f"lidar_2tnew_masked_{frame_num}_{c}.png"))
+                    import time; time.sleep(1)
+                    """ Commentable code ends """
 
                 else:
                     # Run PCA on the points within the mask
@@ -378,7 +439,7 @@ def create_bboxes_nuscenes(nusc: NuScenes, val_scenes: List[str], save_vis: bool
             if sample['next'] != "":
                 sample = nusc.get('sample', sample['next'])
 
-    with open(os.path.join(NUSCENES_OUTPUT, "predictions_naive_test.json"), "w") as f:
+    with open(os.path.join(NUSCENES_OUTPUT, "predictions_pseudolidar.json"), "w") as f:
         json.dump(predictions, f)
 
 

@@ -39,20 +39,20 @@ def infer_image(image_path, intrinsics, model):
     # Load the RGB image and the normalization will be taken care of by the model
     rgb = torch.from_numpy(np.array(Image.open(image_path))).permute(2, 0, 1) # C, H, W
     # # print(intrinsics)
-    # predictions = model.infer(rgb)
-
-    # # Metric Depth Estimation
-    # depth = predictions["depth"]
-    # print(depth.shape)
-    # print(depth)
-    # xyz = predictions["points"]
-    # pred_intrinsics = predictions["intrinsics"]
-
-    predictions = model.infer(rgb, intrinsics)
+    predictions = model.infer(rgb)
 
     # Metric Depth Estimation
     depth = predictions["depth"]
+    # print(depth.shape)
+    # print(depth)
     xyz = predictions["points"]
+    pred_intrinsics = predictions["intrinsics"]
+
+    # predictions = model.infer(rgb, intrinsics)
+
+    # # Metric Depth Estimation
+    # depth = predictions["depth"]
+    # xyz = predictions["points"]
 
     return xyz, depth
 
@@ -77,7 +77,7 @@ def main():
 
         sample = nusc.get('sample', sample_token)
 
-        while sample['next'] != '':
+        while True:
             for cam in CAM_LIST:
                 # Get the camera sensor
                 camera = nusc.get('sample_data', sample['data'][cam])
@@ -96,6 +96,10 @@ def main():
                 xyz_path = os.path.join(NUSCENES_OUTPUT, 'samples-pseudodepth', cam, image_path.split("/")[-1].replace("jpg", "xyz"))
                 os.makedirs(os.path.dirname(xyz_path), exist_ok=True)
                 np.save(xyz_path, xyz)
+
+            
+            if sample['next'] == '':
+                break
 
             sample = nusc.get('sample', sample['next'])
 
